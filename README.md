@@ -56,4 +56,25 @@ es.onmessage = (e) => console.log(JSON.parse(e.data));
 
 Jika klien pertama membuka `/:username`, server akan mencoba auto-connect ke TikTok untuk username tersebut. Saat klien terakhir pergi (SSE dan WS kosong), server akan auto-disconnect.
 
+### Deployment Ubuntu (Nginx + systemd)
+
+1) SSH ke server Ubuntu, install dan jalankan installer (sesuaikan domain & email):
+
+```
+sudo bash deploy/install.sh --domain your.domain.com --email you@example.com \
+  --repo https://github.com/zuliantoe/TTSLiveChatRelay.git --branch main \
+  --app-dir /opt/tiktok-live-chat-relay --service-name tiktok-relay --port 3001
+```
+
+2) Update ke versi terbaru:
+
+```
+sudo bash deploy/update.sh --app-dir /opt/tiktok-live-chat-relay --service-name tiktok-relay --branch main
+```
+
+3) Akses melalui domain:
+
+- SSE: `https://your.domain.com/<username>`
+- WS: `wss://your.domain.com/<username>`
+
 
