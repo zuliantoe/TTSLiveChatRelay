@@ -17,10 +17,21 @@ const wss = new WebSocketServer({ server });
 const manager = new TikTokManager();
 
 // Connected clients registry
-type WsClient = { socket: WebSocket; room: string };
-const wsClientsByRoom = new Map<string, Set<WebSocket>>();
-type SseClient = { id: string; write: (chunk: string) => boolean; end: () => void; room: string };
+type EventFilter = Set<string>; // e.g. {'chat','gift'} or {'*'} for all
+const accepts = (filter: EventFilter, type: string) => filter.has('*') || filter.has('all') || filter.has(type);
+
+type WsClient = { socket: WebSocket; events: EventFilter };
+const wsClientsByRoom = new Map<string, Set<WsClient>>();
+type SseClient = { id: string; write: (chunk: string) => boolean; end: () => void; room: string; events: EventFilter };
 const sseClientsByRoom = new Map<string, Map<string, SseClient>>();
+
+function parseEventsParam(param: string | undefined | null): EventFilter {
+  const raw = (param ?? 'chat').trim();
+  if (!raw) return new Set(['chat']);
+  const list = raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (list.length === 0) return new Set(['chat']);
+  return new Set(list);
+}
 
 // Broadcast helper
 function broadcastEvent(evt: TikTokEvent) {
@@ -28,9 +39,10 @@ function broadcastEvent(evt: TikTokEvent) {
   // WS scoped by room
   const wsSet = wsClientsByRoom.get(evt.room);
   if (wsSet) {
-    for (const ws of wsSet) {
-      if (ws.readyState === WebSocket.OPEN) {
-        try { ws.send(data); } catch {}
+    for (const client of wsSet) {
+      if (!accepts(client.events, evt.type)) continue;
+      if (client.socket.readyState === WebSocket.OPEN) {
+        try { client.socket.send(data); } catch {}
       }
     }
   }
@@ -39,6 +51,7 @@ function broadcastEvent(evt: TikTokEvent) {
   if (roomClients) {
     const ssePayload = `event: ${evt.type}\n` + `data: ${data}\n\n`;
     for (const client of roomClients.values()) {
+      if (!accepts(client.events, evt.type)) continue;
       try { client.write(ssePayload); } catch {}
     }
   }
@@ -86,6 +99,7 @@ app.post('/disconnect', async (req, res) => {
 app.get('/:username', (req, res) => {
   const room = String(req.params.username || '').trim();
   if (!room) return res.status(400).json({ error: 'username required' });
+  const eventsFilter = parseEventsParam((req.query as any)?.events);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -96,7 +110,7 @@ app.get('/:username', (req, res) => {
   const write = (chunk: string) => res.write(chunk);
   const end = () => res.end();
   if (!sseClientsByRoom.has(room)) sseClientsByRoom.set(room, new Map());
-  sseClientsByRoom.get(room)!.set(clientId, { id: clientId, write, end, room });
+  sseClientsByRoom.get(room)!.set(clientId, { id: clientId, write, end, room, events: eventsFilter });
 
   // Send initial comment to open stream
   write(':ok\n\n');
@@ -142,16 +156,21 @@ wss.on('connection', (ws, req) => {
     ws.close(1008, 'username required in path');
     return;
   }
+  const eventsFilter = parseEventsParam(url.searchParams.get('events'));
   if (!wsClientsByRoom.has(room)) wsClientsByRoom.set(room, new Set());
   const set = wsClientsByRoom.get(room)!;
-  set.add(ws);
+  const entry: WsClient = { socket: ws, events: eventsFilter };
+  set.add(entry);
 
   // Ensure TikTok connection for this room
   void manager.connect({ uniqueId: room }).catch(() => {
     try { ws.close(1011, 'failed to connect to TikTok'); } catch {}
   });
   ws.on('close', () => {
-    set.delete(ws);
+    // Remove matching entry for this socket
+    for (const item of set) {
+      if (item.socket === ws) { set.delete(item); break; }
+    }
     if (set.size === 0) {
       wsClientsByRoom.delete(room);
       const sseMap = sseClientsByRoom.get(room);
