@@ -45,7 +45,7 @@ export class TikTokManager extends EventEmitter {
             // Dedupe only for chat events
             if (type === 'chat') {
               const room = options.uniqueId;
-              const key = computeChatKey(payload);
+              const key = this.computeChatKey(payload);
               if (key) {
                 if (!this.shouldEmitChat(room, key)) return;
               }
@@ -108,6 +108,37 @@ export class TikTokManager extends EventEmitter {
   public getStatus() {
     return Array.from(this.connections.keys());
   }
+
+  private computeChatKey(payload: unknown): string | null {
+    try {
+      const anyPayload = payload as any;
+      const id = anyPayload?.msgId || anyPayload?.messageId || anyPayload?.id;
+      if (id) return String(id);
+      const user = anyPayload?.uniqueId || anyPayload?.userId || anyPayload?.user?.userId || anyPayload?.user?.uniqueId;
+      const text = anyPayload?.comment || anyPayload?.text || anyPayload?.content;
+      const time = anyPayload?.createTime || anyPayload?.timestamp || anyPayload?.ts;
+      const approx = `${user ?? ''}|${text ?? ''}|${time ?? ''}`;
+      if (approx !== '||') return approx;
+    } catch {}
+    return null;
+  }
+
+  private shouldEmitChat(room: string, key: string): boolean {
+    const now = Date.now();
+    const ttlMs = 2 * 60 * 1000; // 2 minutes
+    if (!this.recentChatKeysByRoom.has(room)) this.recentChatKeysByRoom.set(room, new Map());
+    const map = this.recentChatKeysByRoom.get(room)!;
+    const last = map.get(key);
+    if (last && now - last < ttlMs) return false; // duplicate within TTL
+    map.set(key, now);
+    if (map.size > 1000) {
+      for (const [k, ts] of map) {
+        if (now - ts >= ttlMs) map.delete(k);
+        if (map.size <= 800) break;
+      }
+    }
+    return true;
+  }
 }
 
 function serializeError(err: unknown) {
@@ -117,43 +148,5 @@ function serializeError(err: unknown) {
   return { message: String(err) };
 }
 
-function computeChatKey(payload: unknown): string | null {
-  try {
-    const anyPayload = payload as any;
-    // Prefer stable message ids if available
-    const id = anyPayload?.msgId || anyPayload?.messageId || anyPayload?.id;
-    if (id) return String(id);
-    // Fallback fingerprint
-    const user = anyPayload?.uniqueId || anyPayload?.userId || anyPayload?.user?.userId || anyPayload?.user?.uniqueId;
-    const text = anyPayload?.comment || anyPayload?.text || anyPayload?.content;
-    const time = anyPayload?.createTime || anyPayload?.timestamp || anyPayload?.ts;
-    const approx = `${user ?? ''}|${text ?? ''}|${time ?? ''}`;
-    if (approx !== '||') return approx;
-  } catch {}
-  return null;
-}
-
-// Methods on prototype to manage recent chat keys
-interface TikTokManager {
-  shouldEmitChat(room: string, key: string): boolean;
-}
-
-TikTokManager.prototype.shouldEmitChat = function (room: string, key: string): boolean {
-  const now = Date.now();
-  const ttlMs = 2 * 60 * 1000; // 2 minutes
-  if (!this.recentChatKeysByRoom.has(room)) this.recentChatKeysByRoom.set(room, new Map());
-  const map = this.recentChatKeysByRoom.get(room)!;
-  const last = map.get(key);
-  if (last && now - last < ttlMs) return false; // duplicate within TTL
-  map.set(key, now);
-  // Opportunistic cleanup if map grows large
-  if (map.size > 1000) {
-    for (const [k, ts] of map) {
-      if (now - ts >= ttlMs) map.delete(k);
-      if (map.size <= 800) break;
-    }
-  }
-  return true;
-};
 
 
